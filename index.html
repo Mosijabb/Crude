@@ -7319,7 +7319,13 @@ setInterval(()=>{
 //  ASSET LOADER — replace emojis with PNG icons from /assets/ folder
 //  Falls back silently to emoji if PNG missing or fails to load
 // ══════════════════════════════════════════════════════════════════
-const ASSET_DIR='assets/';
+// Compute absolute path so relative URLs always work, regardless of
+// page location (subfolder, index.html, trailing slash, etc.)
+const ASSET_DIR = (function(){
+  const here = window.location.href.split('?')[0].split('#')[0];
+  const base = here.endsWith('/') ? here : here.substring(0, here.lastIndexOf('/')+1);
+  return base + 'assets/';
+})();
 // Map of every emoji that might appear → PNG filename
 const ASSET_MAP={
   // Currencies (UI icons)
@@ -7377,6 +7383,9 @@ function assetImg(assetName, fallbackEmoji, extraStyle=''){
   return '<img src="'+ASSET_DIR+assetName+'.png" alt="" onerror="this.outerHTML=\'<span style=&quot;'+extraStyle.replace(/"/g,'&quot;')+'&quot;>'+fallbackEmoji+'</span>\'" style="'+extraStyle+';object-fit:contain;display:inline-block;vertical-align:middle">';
 }
 
+// Track if loading complete
+window._assetsLoaded = false;
+
 // Pre-load all assets so we know which exist
 (async function(){
   const names=Object.values(COMMODITY_ASSETS)
@@ -7386,56 +7395,82 @@ function assetImg(assetName, fallbackEmoji, extraStyle=''){
              'region_gulf','region_northam','region_europe',
              'region_latam','region_asia','region_africa']);
   await Promise.all(names.map(_testAsset));
-  // Once loaded, re-render everything
-  setTimeout(()=>{
-    try{renderGrid&&renderGrid();}catch(e){}
-    try{renderFacs&&renderFacs();}catch(e){}
-    try{renderJobs&&renderJobs();}catch(e){}
-    try{renderWarehouse&&renderWarehouse();}catch(e){}
-    updHUD();
-  }, 50);
+  window._assetsLoaded = true;
+
+  // Count how many loaded vs failed for debugging
+  const loaded = Object.values(ASSET_CACHE).filter(v=>v).length;
+  const failed = Object.values(ASSET_CACHE).filter(v=>!v).length;
+  const failedList = Object.entries(ASSET_CACHE).filter(([k,v])=>!v).map(([k])=>k);
+  console.log('Assets loaded: '+loaded+' | failed: '+failed+' | dir: '+ASSET_DIR);
+  if(failed>0) console.warn('Failed assets:', failedList);
+
+  // VISIBLE diagnostic banner - tap to dismiss
+  const banner=document.createElement('div');
+  banner.style.cssText='position:fixed;top:10px;left:50%;transform:translateX(-50%);background:'+(failed===0?'#2e7d32':loaded===0?'#c62828':'#e65100')+';color:white;padding:10px 14px;border-radius:12px;font-family:sans-serif;font-size:11px;font-weight:700;z-index:99999;box-shadow:0 4px 16px rgba(0,0,0,.4);max-width:90vw;text-align:center;cursor:pointer';
+  banner.textContent='🖼️ Assets: '+loaded+' loaded, '+failed+' failed. Path: '+ASSET_DIR+(failed>0?' Tap to see details':' Tap to dismiss');
+  banner.onclick=()=>{
+    if(failed>0){
+      alert('Failed to load:\n'+failedList.join(', ')+'\n\nExpected path:\n'+window.location.origin+window.location.pathname.replace(/\/[^\/]*$/,'/')+ASSET_DIR+failedList[0]+'.png\n\nCheck:\n1. Folder named exactly "assets" (lowercase)\n2. PNG filenames match exactly (lowercase, .png extension)\n3. Files are uploaded to GitHub Pages');
+    }
+    banner.remove();
+  };
+  document.body.appendChild(banner);
+  setTimeout(()=>{banner.remove();},failed===0?4000:20000);
+
+  // Re-render everything once
+  try{renderGrid&&renderGrid();}catch(e){console.warn('renderGrid err:',e);}
+  try{renderFacs&&renderFacs();}catch(e){}
+  try{renderJobs&&renderJobs();}catch(e){}
+  try{renderWarehouse&&renderWarehouse();}catch(e){}
+  try{_applyHudImgs();}catch(e){}
 })();
 
 // ── Patch renderGrid to use PNG assets for filled cells ──────────
+// Apply image swap on EVERY render (not just one-time)
 (function(){
   const orig=renderGrid;
   renderGrid=function(){
     orig();
+    if(!window._assetsLoaded) return;
     // After base render, replace emoji in filled cells with images
-    document.querySelectorAll('#grid .cell.filled .cell-em').forEach(em=>{
-      const cell=em.closest('.cell');
-      if(!cell)return;
+    document.querySelectorAll('#grid .cell.filled').forEach(cell=>{
       const idx=parseInt(cell.dataset.i);
       const item=G.grid[idx];
       if(!item)return;
+      const em=cell.querySelector('.cell-em');
+      if(!em)return;
+      // Skip if already has an img
+      if(em.querySelector('img'))return;
       const assetName=COMMODITY_ASSETS[item.cid];
-      if(assetName && ASSET_CACHE[assetName]!==false){
-        em.innerHTML='<img src="'+ASSET_DIR+assetName+'.png" style="width:90%;height:90%;object-fit:contain;filter:drop-shadow(0 2px 4px rgba(0,0,0,.25))" onerror="this.parentNode.textContent=\''+C[item.cid].e+'\'">';
+      if(assetName && ASSET_CACHE[assetName]===true){
+        // Wrap the emoji's display in an image - we use position absolute to fully fill the parent span
+        em.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;height:60%;font-size:0;line-height:0';
+        em.innerHTML='<img src="'+ASSET_DIR+assetName+'.png" style="max-width:90%;max-height:90%;object-fit:contain;filter:drop-shadow(0 2px 4px rgba(0,0,0,.25))" onerror="this.parentNode.style.cssText=\'\';this.parentNode.textContent=\''+(C[item.cid]?.e||'?')+'\'">';
       }
     });
   };
 })();
 
 // ── Patch HUD to use coin/gem/energy PNGs ────────────────────────
+function _applyHudImgs(){
+  if(!window._assetsLoaded) return;
+  const pills=document.querySelectorAll('#hud .hpill-i');
+  pills.forEach(p=>{
+    if(p.dataset.asset)return;
+    const txt=p.textContent.trim();
+    let name=null;
+    if(txt==='💰') name='coin';
+    else if(txt==='💎') name='gem';
+    else if(txt==='⚡') name='energy';
+    if(name && ASSET_CACHE[name]===true){
+      p.dataset.asset='1';
+      p.innerHTML='<img src="'+ASSET_DIR+name+'.png" style="width:18px;height:18px;object-fit:contain;vertical-align:middle" onerror="this.parentNode.dataset.asset=\'\';this.parentNode.textContent=\''+txt+'\'">';
+    }
+  });
+}
 (function(){
-  function applyHudImgs(){
-    const pills=document.querySelectorAll('#hud .hpill-i');
-    pills.forEach(p=>{
-      const txt=p.textContent.trim();
-      let name=null;
-      if(txt==='💰') name='coin';
-      else if(txt==='💎') name='gem';
-      else if(txt==='⚡') name='energy';
-      else if(txt==='📊') return; // keep portfolio emoji
-      if(name && ASSET_CACHE[name]!==false && !p.dataset.asset){
-        p.dataset.asset='1';
-        p.innerHTML='<img src="'+ASSET_DIR+name+'.png" style="width:18px;height:18px;object-fit:contain;vertical-align:middle" onerror="this.parentNode.textContent=\''+txt+'\'">';
-      }
-    });
-  }
-  setTimeout(applyHudImgs, 1500);
   const origU=updHUD;
-  updHUD=function(){origU();setTimeout(applyHudImgs,20);};
+  updHUD=function(){origU();setTimeout(_applyHudImgs,20);};
 })();
 
 // ══════════════════════════════════════════════════════════════════
@@ -7590,6 +7625,800 @@ function assetImg(assetName, fallbackEmoji, extraStyle=''){
     }
   `;
   document.head.appendChild(s);
+})();
+
+// ══════════════════════════════════════════════════════════════════
+//  MARKET DEMAND SYSTEM — real-world inspired commodity demand waves
+//  Each commodity has a `demand` multiplier driven by curated events.
+//  Sell prices = base × demand × regional bonus.
+// ══════════════════════════════════════════════════════════════════
+
+// ── DEMAND EVENTS — curated weekly file (edit by hand) ────────────
+// Each event boosts demand for specific commodities for a duration.
+// `boost` is multiplier above 1.0 (1.3 = +30% demand).
+// `decay` = how the boost fades: 'sharp' (1-3 days), 'medium' (5-10), 'slow' (14-21)
+const DEMAND_EVENTS = [
+  { id:'nvidia_ram',
+    headline:'⚡ NVIDIA PRE-BUYS GLOBAL RAM SUPPLY',
+    desc:'AI chip giant locks in 60% of memory production. Ripple effect across tech.',
+    affects:{ ram:2.3, microchip:1.4, quantum_chip:1.6, copper_circuit:1.2 },
+    severity:'crisis', decay:'medium', startDays:0, durationDays:14 },
+  { id:'brazil_drought',
+    headline:'🌧️ BRAZIL COFFEE DROUGHT WORSENS',
+    desc:'Worst harvest in 20 years. Specialty coffee prices surging globally.',
+    affects:{ coffee_bean:1.5, roasted_coffee:1.7, luxury_pastry:1.3 },
+    severity:'major', decay:'slow', startDays:0, durationDays:21 },
+  { id:'hormuz',
+    headline:'🚢 HORMUZ STRAIT TENSIONS ESCALATE',
+    desc:'30% of global oil shipping at risk. Markets bracing for spike.',
+    affects:{ crude_oil:1.4, refined_oil:1.3, gasoline:1.6, diesel:1.5 },
+    severity:'major', decay:'sharp', startDays:0, durationDays:5 },
+  { id:'china_steel',
+    headline:'🏗️ CHINA INFRASTRUCTURE BOOM',
+    desc:'$2T stimulus driving global steel demand to record highs.',
+    affects:{ iron_ore:1.3, steel:1.5, structural_steel:1.7, alloy_steel:1.4 },
+    severity:'major', decay:'medium', startDays:0, durationDays:14 },
+  { id:'tsmc',
+    headline:'💻 TSMC FAB INCIDENT — CHIP SHORTAGE',
+    desc:'Major Taiwan semiconductor plant offline. Microchip prices skyrocketing.',
+    affects:{ microchip:1.8, quantum_chip:1.5, copper_circuit:1.3, silicon:1.4 },
+    severity:'crisis', decay:'medium', startDays:1, durationDays:10 },
+  { id:'aerospace',
+    headline:'✈️ BOEING + AIRBUS RAMP UP ORDERS',
+    desc:'Aviation recovery driving aerospace alloys demand.',
+    affects:{ aerospace_comp:1.6, alloy_steel:1.3, structural_steel:1.2 },
+    severity:'major', decay:'slow', startDays:0, durationDays:21 },
+  { id:'ev_battery',
+    headline:'🔋 EU EV MANDATE ACCELERATED',
+    desc:'2030 ICE ban pulled forward. Battery materials in frenzy.',
+    affects:{ lithium:1.7, cobalt:1.8, battery_cell:1.5, ev_battery:1.6 },
+    severity:'major', decay:'slow', startDays:2, durationDays:21 },
+  { id:'wheat_war',
+    headline:'🌾 BLACK SEA SHIPPING DISRUPTED',
+    desc:'Grain corridor blocked. European wheat prices climbing.',
+    affects:{ wheat:1.4, flour:1.3, bread:1.2 },
+    severity:'major', decay:'sharp', startDays:0, durationDays:7 },
+  { id:'copper_strike',
+    headline:'⛏️ CHILE MINERS STRIKE ENTERS WEEK 3',
+    desc:'World\'s largest copper producer halted. Tech industries panicking.',
+    affects:{ copper:1.5, copper_wire:1.4, copper_circuit:1.3, microchip:1.2 },
+    severity:'major', decay:'medium', startDays:0, durationDays:9 },
+  { id:'good_harvest',
+    headline:'☀️ BUMPER GLOBAL WHEAT HARVEST',
+    desc:'Best growing season in decades. Wheat oversupply pushing prices down.',
+    affects:{ wheat:0.8, flour:0.85, bread:0.92 },
+    severity:'mild', decay:'slow', startDays:7, durationDays:21 },
+];
+
+// Commodities to add for the new world: RAM, lithium, cobalt, battery_cell, ev_battery, copper, copper_wire
+(function(){
+  const newCommodities = {
+    ram:        {n:'RAM Module',e:'💾',tier:5,ch:'tech',base:1800,r:'rare',u:'module',
+                 f:'High-bandwidth memory used in AI accelerators and servers.'},
+    lithium:    {n:'Lithium',e:'🔋',tier:1,ch:'tech',base:60,r:'common',u:'kg',
+                 f:'Soft alkali metal essential for rechargeable batteries.'},
+    cobalt:     {n:'Cobalt',e:'🟦',tier:2,ch:'tech',base:280,r:'uncommon',u:'kg',
+                 f:'Critical battery cathode material. Mostly mined in DR Congo.'},
+    battery_cell:{n:'Battery Cell',e:'🔋',tier:3,ch:'tech',base:680,r:'uncommon',u:'cell',
+                 f:'Single lithium-ion cell. Building block of every modern battery.'},
+    battery_pack:{n:'Battery Pack',e:'🔋',tier:4,ch:'tech',base:1500,r:'rare',u:'pack',
+                 f:'Assembled battery pack ready for integration.'},
+    ev_battery: {n:'EV Battery',e:'🚗',tier:5,ch:'tech',base:3200,r:'rare',u:'unit',
+                 f:'Complete electric vehicle battery system. The crown jewel of energy transition.'},
+    copper:     {n:'Copper',e:'🟫',tier:1,ch:'metals',base:120,r:'common',u:'kg',
+                 f:'Most conductive non-precious metal. Backbone of all electronics.'},
+    copper_wire:{n:'Copper Wire',e:'🌀',tier:2,ch:'metals',base:340,r:'common',u:'spool',
+                 f:'Drawn copper wire for electrical applications.'},
+  };
+  Object.entries(newCommodities).forEach(([id,c])=>{
+    if(!C[id]) C[id]=c;
+  });
+})();
+
+// ── Live demand state ──────────────────────────────────────────────
+// G.demandMults = {commodityId: multiplier}  (1.0 = baseline)
+// G.activeEvents = [{eventId, startedAt, expiresAt}]
+function _initDemandSystem(){
+  if(!G.demandMults) G.demandMults = {};
+  if(!G.activeEvents) G.activeEvents = [];
+  if(!G.eventsLastRolled) G.eventsLastRolled = 0;
+  // Roll new events every 6 hours
+  if(Date.now() - G.eventsLastRolled > 6*60*60*1000){
+    _rollNewDemandEvents();
+    G.eventsLastRolled = Date.now();
+  }
+  _recalcDemand();
+}
+
+function _rollNewDemandEvents(){
+  // Bring in 2-4 fresh events from the pool, ensuring variety
+  const n = 2 + Math.floor(Math.random()*3);
+  const candidates = [...DEMAND_EVENTS].sort(()=>Math.random()-0.5);
+  G.activeEvents = G.activeEvents.filter(ev=>Date.now() < ev.expiresAt); // keep unexpired
+  let added = 0;
+  for(const ev of candidates){
+    if(added >= n) break;
+    if(G.activeEvents.find(a=>a.eventId===ev.id)) continue;
+    G.activeEvents.push({
+      eventId: ev.id,
+      startedAt: Date.now() + ev.startDays*24*60*60*1000,
+      expiresAt: Date.now() + (ev.startDays + ev.durationDays)*24*60*60*1000,
+    });
+    added++;
+  }
+  save();
+}
+
+function _recalcDemand(){
+  G.demandMults = {};
+  if(!G.activeEvents) return;
+  const now = Date.now();
+  G.activeEvents.forEach(actEv=>{
+    const def = DEMAND_EVENTS.find(e=>e.id===actEv.eventId);
+    if(!def) return;
+    // Only apply if currently active (started, not expired)
+    if(now < actEv.startedAt || now > actEv.expiresAt) return;
+    // Compute decay factor: full strength early, fading toward end
+    const total = actEv.expiresAt - actEv.startedAt;
+    const elapsed = now - actEv.startedAt;
+    const remaining = 1 - (elapsed/total);
+    let strength = remaining;
+    if(def.decay==='sharp') strength = Math.pow(remaining, 0.5); // stays strong then drops fast
+    else if(def.decay==='slow') strength = Math.pow(remaining, 1.5); // fades early then long tail
+    // Apply boost (interpolate between 1.0 and full boost based on strength)
+    Object.entries(def.affects).forEach(([cid,boost])=>{
+      const effectiveBoost = 1 + (boost-1)*strength;
+      G.demandMults[cid] = (G.demandMults[cid]||1) * effectiveBoost;
+    });
+  });
+}
+
+// Get current demand multiplier for a commodity
+function getDemand(cid){
+  if(!G.demandMults) return 1.0;
+  return G.demandMults[cid] || 1.0;
+}
+
+// Patch tSim to apply demand multipliers
+(function(){
+  const origTSim = tSim;
+  tSim = function(){
+    _initDemandSystem();
+    const o = origTSim();
+    // Apply demand multipliers to final price
+    Object.keys(o).forEach(cid=>{
+      const mult = getDemand(cid);
+      if(mult !== 1.0){
+        o[cid] = {...o[cid], p: +(o[cid].p * mult).toFixed(2), demand: mult};
+      }
+    });
+    return o;
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════
+//  MINES — new building type (raw resource generators)
+//  Mines are passive: they produce raw resources on a slow timer.
+//  Can be tapped to speed up next production (uses energy).
+// ══════════════════════════════════════════════════════════════════
+
+const MINES = [
+  { id:'iron_mine',     name:'Iron Mine',         flag:'⛏️',  produces:'iron_ore',  cost:300,  rate:8,  unlockLv:1 },
+  { id:'oil_well',      name:'Oil Well',          flag:'🛢️',  produces:'crude_oil', cost:500,  rate:6,  unlockLv:2 },
+  { id:'copper_mine',   name:'Copper Mine',       flag:'🟫',   produces:'copper',    cost:700,  rate:5,  unlockLv:3 },
+  { id:'silicon_quarry',name:'Silicon Quarry',    flag:'💿',  produces:'silicon',   cost:900,  rate:4,  unlockLv:4 },
+  { id:'coffee_farm_m', name:'Coffee Plantation', flag:'☕',  produces:'coffee_bean',cost:600, rate:6,  unlockLv:2 },
+  { id:'wheat_farm_m',  name:'Wheat Farm',        flag:'🌾',  produces:'wheat',     cost:500,  rate:7,  unlockLv:1 },
+  { id:'soy_farm_m',    name:'Soy Plantation',    flag:'🌱',  produces:'soybean',   cost:550,  rate:7,  unlockLv:1 },
+  { id:'lithium_mine',  name:'Lithium Mine',      flag:'🔋',  produces:'lithium',   cost:1500, rate:3,  unlockLv:6 },
+  { id:'cobalt_mine',   name:'Cobalt Mine',       flag:'🟦',  produces:'cobalt',    cost:2200, rate:2,  unlockLv:8 },
+];
+
+function _initMines(){
+  if(!G.mines) G.mines = {};            // {mineId: {built: true, lastTick: timestamp}}
+  if(!G.mineOutputs) G.mineOutputs = {}; // {mineId: count}
+}
+
+// Tap a mine to claim accumulated output
+function tapMine(mineId){
+  _initMines();
+  const mine = MINES.find(m=>m.id===mineId);
+  if(!mine || !G.mines[mineId]){ notif('error','Mine not built!'); return; }
+  const out = G.mineOutputs[mineId]||0;
+  if(out <= 0){ notif('error','No output yet — wait!'); return; }
+  // Push items onto grid or storage
+  let claimed = 0;
+  for(let i=0;i<out;i++){
+    const empty = G.grid.findIndex(x=>x===null);
+    if(empty !== -1 && gridItemCount() < maxItems()){
+      G.grid[empty] = mkI(mine.produces); claimed++;
+    } else if(G.warehouse.length < G.whCap){
+      G.warehouse.push(mkI(mine.produces)); claimed++;
+    } else break;
+  }
+  G.mineOutputs[mineId] -= claimed;
+  if(claimed > 0){
+    renderGrid(); updHUD(); save();
+    notif('daily','⛏️ Claimed '+claimed+' '+C[mine.produces].n);
+    sDrop();
+  } else {
+    notif('error','Grid and storage full!');
+  }
+  renderMinesList();
+}
+
+function buildMine(mineId){
+  const mine = MINES.find(m=>m.id===mineId);
+  if(!mine) return;
+  if(G.level < mine.unlockLv){ notif('error','Need level '+mine.unlockLv+'!'); return; }
+  if(G.coins < mine.cost){ notif('error','Need 💰'+fp(mine.cost)+'!'); return; }
+  G.coins -= mine.cost;
+  _initMines();
+  G.mines[mineId] = { built:true, lastTick: Date.now() };
+  G.mineOutputs[mineId] = 0;
+  updHUD(); save();
+  notif('levelup','⛏️ '+mine.name+' built!');
+  sLvl();
+  renderMinesList();
+}
+
+// Background mine production tick
+setInterval(()=>{
+  _initMines();
+  let any = false;
+  Object.keys(G.mines).forEach(id=>{
+    const mine = MINES.find(m=>m.id===id); if(!mine) return;
+    const last = G.mines[id].lastTick||Date.now();
+    // Produce 1 item per (3600/rate) seconds, capped at 20 stockpile
+    const secsPer = 3600/mine.rate;
+    const elapsed = (Date.now()-last)/1000;
+    const newOutput = Math.floor(elapsed/secsPer);
+    if(newOutput > 0){
+      G.mineOutputs[id] = Math.min(20, (G.mineOutputs[id]||0)+newOutput);
+      G.mines[id].lastTick = last + newOutput*secsPer*1000;
+      any = true;
+    }
+  });
+  if(any){ save(); _refreshMinesIfVisible(); }
+},10000);
+
+function _refreshMinesIfVisible(){
+  if(document.getElementById('mines-section') && !document.getElementById('workshop-screen').classList.contains('hidden')){
+    renderMinesList();
+  }
+}
+
+// Render mines list (called when workshop screen open)
+function renderMinesList(){
+  let section = document.getElementById('mines-section');
+  if(!section){
+    const flist = document.getElementById('flist');
+    if(!flist) return;
+    section = document.createElement('div');
+    section.id = 'mines-section';
+    section.style.cssText = 'margin-top:14px;padding-top:14px;border-top:2px dashed rgba(184,125,40,.4)';
+    flist.parentNode.appendChild(section);
+  }
+  _initMines();
+  let html = '<div style="font-family:var(--ff);font-size:13px;color:#3d2608;letter-spacing:.05em;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span>⛏️</span><span>RAW MATERIAL MINES</span></div>';
+  html += '<div style="font-size:9px;color:var(--txt3);margin-bottom:10px;font-family:var(--fb)">Mines passively extract raw resources. Tap to claim accumulated output.</div>';
+  MINES.forEach(mine=>{
+    const built = G.mines[mine.id];
+    const output = G.mineOutputs[mine.id]||0;
+    const locked = G.level < mine.unlockLv;
+    const c = C[mine.produces];
+    html += '<div style="background:linear-gradient(180deg,#fff9e8,#fff0c0);border:2.5px solid #b87d28;border-radius:14px;padding:10px;margin-bottom:8px;box-shadow:0 3px 0 #8a5a18;display:flex;align-items:center;gap:10px;'+(locked?'opacity:.45':'')+'">';
+    html += '<div style="font-size:30px;flex-shrink:0">'+mine.flag+'</div>';
+    html += '<div style="flex:1;min-width:0">';
+    html += '<div style="font-family:var(--ff);font-size:13px;color:#3d2608">'+mine.name+'</div>';
+    html += '<div style="font-size:9px;color:#8a5a18;margin-top:1px">Produces: '+(c?c.e+' '+c.n:mine.produces)+'</div>';
+    html += '<div style="font-size:9px;color:var(--txt3);margin-top:1px">Rate: '+mine.rate+'/hr</div>';
+    html += '</div>';
+    if(locked){
+      html += '<div style="background:rgba(0,0,0,.15);color:white;font-family:var(--ff);font-size:9px;padding:4px 8px;border-radius:8px">🔒 LV '+mine.unlockLv+'</div>';
+    } else if(!built){
+      html += '<button onclick="buildMine(\''+mine.id+'\')" style="background:linear-gradient(180deg,#ffd600,#ff9800);color:#3d1a00;border:none;font-family:var(--ff);font-size:10px;padding:8px 12px;border-radius:11px;cursor:pointer;box-shadow:0 4px 0 #803d00">🏗️ '+fp(mine.cost)+'</button>';
+    } else {
+      const btnColor = output>0 ? 'linear-gradient(180deg,#66bb6a,#388e3c)' : 'linear-gradient(180deg,#bbb,#888)';
+      const btnSh = output>0 ? '0 4px 0 #1b5e20' : '0 3px 0 #555';
+      html += '<button onclick="tapMine(\''+mine.id+'\')" style="background:'+btnColor+';color:white;border:none;font-family:var(--ff);font-size:11px;padding:8px 12px;border-radius:11px;cursor:pointer;box-shadow:'+btnSh+';min-width:70px">'+(output>0?'⛏️ '+output:'⏳ Wait')+'</button>';
+    }
+    html += '</div>';
+  });
+  section.innerHTML = html;
+}
+
+// Inject mines into renderFacs lifecycle
+(function(){
+  const orig = renderFacs;
+  renderFacs = function(){
+    orig();
+    setTimeout(renderMinesList, 50);
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════
+//  DIRECTIONABLE FACTORIES — recipe-based production
+//  Each factory is domain-locked but can switch between recipes within
+//  its domain. Recipes need INPUT items to produce OUTPUT.
+// ══════════════════════════════════════════════════════════════════
+
+// Factory recipes: factory_id -> [{inputs:{itemId:count}, output:itemId, name:String}]
+const FAC_RECIPES = {
+  china: [   // Oil Refinery
+    { id:'crude_to_refined', name:'Refined Oil',   inputs:{crude_oil:2},                 output:'refined_oil' },
+    { id:'refined_to_gas',   name:'Gasoline',      inputs:{refined_oil:2},               output:'gasoline' },
+    { id:'gas_to_diesel',    name:'Diesel',        inputs:{gasoline:2},                  output:'diesel' },
+    { id:'diesel_to_petro',  name:'Petrochemical', inputs:{diesel:2},                    output:'petrochemical' },
+  ],
+  india: [   // Steel Mill
+    { id:'iron_to_pig',      name:'Pig Iron',      inputs:{iron_ore:2},                  output:'pig_iron' },
+    { id:'pig_to_steel',     name:'Steel',         inputs:{pig_iron:2},                  output:'steel' },
+    { id:'steel_to_struct',  name:'Structural',    inputs:{steel:2},                     output:'structural_steel' },
+    { id:'struct_to_alloy',  name:'Alloy Steel',   inputs:{structural_steel:2},          output:'alloy_steel' },
+    { id:'alloy_to_aero',    name:'Aerospace',     inputs:{alloy_steel:2},               output:'aerospace_comp' },
+  ],
+  brazil: [  // Agro Processor
+    { id:'soy_to_oil',       name:'Soy Oil',       inputs:{soybean:2},                   output:'soy_oil' },
+    { id:'wheat_to_flour',   name:'Flour',         inputs:{wheat:2},                     output:'flour' },
+    { id:'flour_to_bread',   name:'Bread',         inputs:{flour:2},                     output:'bread' },
+    { id:'coffee_roast',     name:'Roasted Coffee',inputs:{coffee_bean:2},               output:'roasted_coffee' },
+    { id:'pastry',           name:'Luxury Pastry', inputs:{bread:1, roasted_coffee:1},   output:'luxury_pastry' },
+  ],
+  germany: [ // Tech Fab — RAM and EV battery paths!
+    { id:'silicon_to_circuit',name:'Copper Circuit',inputs:{silicon:1, copper:1},        output:'copper_circuit' },
+    { id:'circuit_to_chip',  name:'Microchip',     inputs:{copper_circuit:2},            output:'microchip' },
+    { id:'chip_to_ram',      name:'RAM Module 💾', inputs:{microchip:2, silicon:1},      output:'ram' },
+    { id:'chip_to_quantum',  name:'Quantum Chip',  inputs:{microchip:2, silicon:2},      output:'quantum_chip' },
+    { id:'lithium_to_cell',  name:'Battery Cell',  inputs:{lithium:1, cobalt:1},         output:'battery_cell' },
+    { id:'cell_to_pack',     name:'Battery Pack',  inputs:{battery_cell:2},              output:'battery_pack' },
+    { id:'pack_to_evbat',    name:'EV Battery 🚗', inputs:{battery_pack:2},              output:'ev_battery' },
+  ],
+  uae: [     // Copper Works
+    { id:'copper_to_wire',   name:'Copper Wire',   inputs:{copper:2},                    output:'copper_wire' },
+    { id:'wire_to_circuit',  name:'Copper Circuit',inputs:{copper_wire:2},               output:'copper_circuit' },
+    { id:'circuit_to_chip',  name:'Microchip',     inputs:{copper_circuit:2},            output:'microchip' },
+  ],
+  sweden: [  // Solar / Green
+    { id:'silicon_to_solar', name:'Solar Cell',    inputs:{silicon:2},                   output:'solar_cell' },
+    { id:'cell_to_panel',    name:'Solar Panel',   inputs:{solar_cell:2},                output:'solar_panel' },
+  ],
+};
+
+// Player's chosen recipe per factory
+function _initFacRecipes(){
+  if(!G.facActiveRecipe) G.facActiveRecipe = {};
+}
+
+function setFacRecipe(facId, recipeId){
+  _initFacRecipes();
+  G.facActiveRecipe[facId] = recipeId;
+  save();
+  notif('daily','🔧 '+(FAC_RECIPES[facId]?.find(r=>r.id===recipeId)?.name||recipeId)+' recipe set!');
+  if(typeof renderFacs==='function') renderFacs();
+}
+
+function getFacActiveRecipe(facId){
+  _initFacRecipes();
+  const recipes = FAC_RECIPES[facId]||[];
+  if(!recipes.length) return null;
+  const id = G.facActiveRecipe[facId];
+  return recipes.find(r=>r.id===id) || recipes[0]; // default: first recipe
+}
+
+// Override tapFacProduce to use recipe-based production
+(function(){
+  if(typeof tapFacProduce !== 'function') return;
+  const orig = tapFacProduce;
+  tapFacProduce = function(facId){
+    const fac = FACS.find(f=>f.id===facId);
+    if(!fac || !G.factories[facId]){ notif('error','Factory not built!'); return; }
+
+    // Cooldown check
+    if(!G.facCooldown) G.facCooldown = {};
+    const cd = G.facCooldown[facId]||0;
+    if(Date.now() < cd){
+      const secs = Math.ceil((cd-Date.now())/1000);
+      _showFacCooldownModal(facId, Math.floor(secs/60), secs%60, fac.name);
+      return;
+    }
+
+    if(G.energy<=0){ notif('error','⚡ No energy!'); return; }
+
+    // RECIPE-BASED: check if we have inputs
+    const recipe = getFacActiveRecipe(facId);
+    if(recipe && recipe.inputs){
+      const haveAll = Object.entries(recipe.inputs).every(([cid,n])=>{
+        const onGrid = G.grid.filter(it=>it && it.cid===cid).length;
+        const inWh = G.warehouse.filter(it=>it && it.cid===cid).length;
+        return (onGrid+inWh) >= n;
+      });
+      if(!haveAll){
+        const need = Object.entries(recipe.inputs).map(([cid,n])=>n+'× '+(C[cid]?.e||'?')+' '+(C[cid]?.n||cid)).join(', ');
+        notif('error','Need: '+need);
+        return;
+      }
+      // Consume inputs
+      Object.entries(recipe.inputs).forEach(([cid,n])=>{
+        let need = n;
+        // From grid first
+        for(let i=0;i<G.grid.length && need>0;i++){
+          if(G.grid[i] && G.grid[i].cid===cid){ G.grid[i]=null; need--; }
+        }
+        // Then warehouse
+        while(need>0){
+          const idx = G.warehouse.findIndex(it=>it && it.cid===cid);
+          if(idx===-1) break;
+          G.warehouse.splice(idx,1); need--;
+        }
+      });
+
+      G.energy = Math.max(0, G.energy-1);
+      G.facTapCount = G.facTapCount||{};
+      G.facTapCount[facId] = (G.facTapCount[facId]||0)+1;
+
+      // Spawn output (with rare drop chance)
+      let spawnId = recipe.output;
+      let isRare = false;
+      if(Math.random() < FAC_RARE_CHANCE && C['factory_blueprint']){
+        spawnId = 'factory_blueprint';
+        isRare = true;
+      }
+
+      const empty = G.grid.findIndex(x=>x===null);
+      if(empty!==-1 && gridItemCount() < maxItems()){
+        G.grid[empty] = mkI(spawnId);
+      } else if(G.warehouse.length < G.whCap){
+        G.warehouse.push(mkI(spawnId));
+        notif('daily','📦 Grid full → storage');
+      } else {
+        // Refund
+        Object.entries(recipe.inputs).forEach(([cid,n])=>{
+          for(let i=0;i<n;i++){
+            const slot = G.grid.findIndex(x=>x===null);
+            if(slot!==-1) G.grid[slot] = mkI(cid);
+            else G.warehouse.push(mkI(cid));
+          }
+        });
+        G.energy = Math.min(G.maxEnergy, G.energy+1);
+        notif('error','No space — inputs refunded');
+        return;
+      }
+
+      updHUD(); renderGrid(); save();
+      _arcFlyAnimation(C[spawnId]?.e||'✨', empty);
+
+      // Squeeze
+      const card = document.querySelector('[data-facid="'+facId+'"]');
+      if(card){
+        card.style.transform='scale(.93)'; card.style.transition='transform .12s ease';
+        setTimeout(()=>{card.style.transform='scale(1.04)';},120);
+        setTimeout(()=>{card.style.transform='scale(1)';card.style.transition='';},220);
+      }
+
+      if(isRare){ sMerge(); notif('levelup','🔧 RARE! Factory Blueprint!'); }
+      else { sMerge(); notif('daily','✅ Made '+(C[spawnId]?.e||'')+' '+(C[spawnId]?.n||spawnId)); }
+
+      // Cooldown
+      if(G.facTapCount[facId] >= FAC_TAP_LIMIT){
+        G.facCooldown[facId] = Date.now() + FAC_COOLDOWN_MS;
+        G.facTapCount[facId] = 0;
+        save();
+        _showFacCooldownToast(fac.name);
+      }
+      _updateFacTapBtn(facId);
+    } else {
+      // No recipe defined — fallback to original behavior
+      orig(facId);
+    }
+  };
+})();
+
+// Patch renderFacs to add recipe selector
+(function(){
+  const orig = renderFacs;
+  renderFacs = function(){
+    orig();
+    _initFacRecipes();
+    // For each owned factory, inject recipe selector
+    document.querySelectorAll('#flist .fcard').forEach((card,ci)=>{
+      const fac = FACS[ci]; if(!fac || !G.factories[fac.id]) return;
+      const recipes = FAC_RECIPES[fac.id]; if(!recipes) return;
+      if(card.querySelector('[data-recipe-sel]')) return;
+
+      const active = getFacActiveRecipe(fac.id);
+      const wrap = document.createElement('div');
+      wrap.dataset.recipeSel = '1';
+      wrap.style.cssText = 'background:rgba(184,125,40,.08);border:2px dashed rgba(184,125,40,.4);border-radius:11px;padding:8px;margin:6px 0';
+      let html = '<div style="font-family:var(--ff);font-size:9px;color:#8a5a18;margin-bottom:6px;letter-spacing:.06em">🔧 PRODUCING: <strong style="color:#3d2608">'+(active?.name||'—')+'</strong></div>';
+      html += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
+      recipes.forEach(r=>{
+        const isActive = active?.id===r.id;
+        const inputs = Object.entries(r.inputs).map(([cid,n])=>n+'×'+(C[cid]?.e||'?')).join(' ');
+        html += '<button onclick="setFacRecipe(\''+fac.id+'\',\''+r.id+'\')" style="flex:1;min-width:80px;padding:5px 6px;border-radius:8px;border:'+(isActive?'2.5px solid #c06000':'1.5px solid rgba(184,125,40,.4)')+';background:'+(isActive?'linear-gradient(180deg,#ffd600,#ff9800)':'white')+';color:'+(isActive?'#3d1a00':'#3d2608')+';font-family:var(--ff);font-size:8.5px;cursor:pointer;line-height:1.3">'+
+          '<div>'+(C[r.output]?.e||'')+' '+r.name+'</div>'+
+          '<div style="font-size:7.5px;opacity:.75;margin-top:2px">in: '+inputs+'</div>'+
+          '</button>';
+      });
+      html += '</div>';
+      wrap.innerHTML = html;
+
+      // Insert before the tap button area
+      const tapBtn = card.querySelector('[data-fac-tap]');
+      if(tapBtn) card.insertBefore(wrap, tapBtn.parentNode);
+      else card.appendChild(wrap);
+    });
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════
+//  NEW MARKET SCREEN — Hot Demand · World News · Buyers
+// ══════════════════════════════════════════════════════════════════
+
+// Buyers: hybrid system
+const FIXED_BUYERS = [
+  { id:'tata',    name:'Tata Steel',         emoji:'🏭', wants:['structural_steel','steel','alloy_steel'],   payMult:1.4 },
+  { id:'starbucks',name:'Starbucks Mumbai',  emoji:'☕', wants:['roasted_coffee','luxury_pastry'],            payMult:1.5 },
+  { id:'samsung', name:'Samsung Foundry',    emoji:'💻', wants:['microchip','quantum_chip','ram'],            payMult:1.6 },
+  { id:'shell',   name:'Shell Energy',       emoji:'⛽', wants:['gasoline','diesel','refined_oil'],           payMult:1.4 },
+  { id:'tesla',   name:'Tesla Gigafactory',  emoji:'🚗', wants:['ev_battery','battery_pack','battery_cell'],  payMult:1.7 },
+];
+
+function _initBuyers(){
+  if(!G.rotatingBuyers) G.rotatingBuyers = [];
+  if(!G.buyersLastRolled) G.buyersLastRolled = 0;
+  // Roll new rotating buyers every 24h
+  if(Date.now() - G.buyersLastRolled > 24*60*60*1000){
+    _rollRotatingBuyers();
+    G.buyersLastRolled = Date.now();
+  }
+}
+
+function _rollRotatingBuyers(){
+  const allCommodities = Object.keys(C).filter(id=>C[id].tier>=2);
+  const shuffled = [...allCommodities].sort(()=>Math.random()-0.5);
+  const buyers = [];
+  for(let i=0;i<3;i++){
+    const cid = shuffled[i];
+    const c = C[cid]; if(!c) continue;
+    const qty = 2 + Math.floor(Math.random()*4);
+    const baseTotal = c.base * qty;
+    // Higher mult if commodity is in demand
+    const demandMult = getDemand(cid);
+    const payMult = 1.6 + Math.random()*0.6 + (demandMult-1)*0.5;
+    buyers.push({
+      id:'rb_'+Date.now()+'_'+i,
+      name: ['Acme Corp','Zenith Industries','Apex Trading','Vanguard Holdings','Prime Manufacturing','Crown Logistics'][i%6],
+      emoji: ['🏢','🏭','🏗️','📦','💼','⚙️'][i%6],
+      wants:[cid],
+      qty: qty,
+      payTotal: Math.floor(baseTotal * payMult * demandMult),
+      expiresAt: Date.now() + 24*60*60*1000,
+    });
+  }
+  G.rotatingBuyers = buyers;
+  save();
+}
+
+function sellToBuyer(buyerId, isFixed){
+  let buyer;
+  if(isFixed) buyer = FIXED_BUYERS.find(b=>b.id===buyerId);
+  else buyer = (G.rotatingBuyers||[]).find(b=>b.id===buyerId);
+  if(!buyer) return;
+
+  if(isFixed){
+    // Fixed buyers: sell 1 of their preferred commodity at boosted rate
+    const wantList = buyer.wants;
+    let sold = false;
+    for(const cid of wantList){
+      const onGrid = G.grid.findIndex(it=>it && it.cid===cid);
+      const inWh = G.warehouse.findIndex(it=>it && it.cid===cid);
+      if(onGrid !== -1 || inWh !== -1){
+        const c = C[cid];
+        const basePrice = G.prices[cid]?.p || c.base;
+        const pay = Math.floor(basePrice * buyer.payMult);
+        if(onGrid !== -1) G.grid[onGrid] = null;
+        else G.warehouse.splice(inWh,1);
+        G.coins += pay;
+        G.earned = (G.earned||0) + pay;
+        notif('levelup','💰 Sold '+c.e+' '+c.n+' to '+buyer.name+' for '+fp(pay)+'!');
+        sSell();
+        renderGrid(); updHUD(); save();
+        sold = true;
+        break;
+      }
+    }
+    if(!sold){ notif('error','You don\'t have anything '+buyer.name+' wants!'); }
+  } else {
+    // Rotating: must fulfill exact qty
+    const cid = buyer.wants[0];
+    const haveTotal = G.grid.filter(it=>it && it.cid===cid).length + G.warehouse.filter(it=>it && it.cid===cid).length;
+    if(haveTotal < buyer.qty){
+      notif('error','Need '+buyer.qty+' '+(C[cid]?.e||'')+' (have '+haveTotal+')');
+      return;
+    }
+    let need = buyer.qty;
+    // From grid
+    for(let i=0;i<G.grid.length && need>0;i++){
+      if(G.grid[i] && G.grid[i].cid===cid){ G.grid[i]=null; need--; }
+    }
+    while(need>0){
+      const idx = G.warehouse.findIndex(it=>it && it.cid===cid);
+      if(idx===-1) break;
+      G.warehouse.splice(idx,1); need--;
+    }
+    G.coins += buyer.payTotal;
+    G.earned = (G.earned||0) + buyer.payTotal;
+    G.rotatingBuyers = G.rotatingBuyers.filter(b=>b.id!==buyer.id);
+    notif('levelup','💰 SPECIAL ORDER COMPLETE! +'+fp(buyer.payTotal));
+    sLvl();
+    dopamineSpike('upgrade');
+    renderGrid(); updHUD(); save();
+    renderMarket();
+  }
+  renderMarket();
+}
+
+// New renderMarket
+(function(){
+  if(typeof renderMarket !== 'function') return;
+  renderMarket = function(){
+    _initDemandSystem();
+    _initBuyers();
+    _recalcDemand();
+
+    const screen = document.getElementById('market-screen');
+    if(!screen) return;
+    // Remove old structure
+    screen.innerHTML = '';
+    screen.style.cssText = 'overflow-y:auto;padding:8px;background:linear-gradient(180deg,#e3f2fd,#bbdefb);display:flex;flex-direction:column;gap:10px';
+
+    // ─── HOT DEMAND BOARD ───
+    const sorted = Object.entries(G.demandMults||{})
+      .filter(([cid,m])=>C[cid] && Math.abs(m-1) > 0.05)
+      .sort((a,b)=>Math.abs(b[1]-1)-Math.abs(a[1]-1))
+      .slice(0,5);
+    let hotHTML = '<div style="background:linear-gradient(135deg,#fff3e0,#ffe0b2);border:3px solid #ff9800;border-radius:16px;padding:12px;box-shadow:0 4px 0 #c43e00,0 5px 14px rgba(255,152,0,.25)">';
+    hotHTML += '<div style="font-family:var(--ff);font-size:13px;color:#e65100;margin-bottom:9px;display:flex;align-items:center;gap:6px;letter-spacing:.06em"><span style="font-size:18px;animation:pulse 1.5s ease infinite">🔥</span>HOT DEMAND BOARD</div>';
+    if(sorted.length===0){
+      hotHTML += '<div style="font-size:10px;color:#8a5a18;text-align:center;padding:8px">All markets stable. Check back soon!</div>';
+    } else {
+      sorted.forEach(([cid,mult])=>{
+        const c = C[cid]; if(!c) return;
+        const pct = Math.round((mult-1)*100);
+        const isUp = mult > 1;
+        const color = isUp ? '#2e7d32' : '#c62828';
+        const arrow = isUp ? '▲' : '▼';
+        // Find the event causing this
+        const cause = (G.activeEvents||[])
+          .map(ev=>DEMAND_EVENTS.find(e=>e.id===ev.eventId))
+          .find(def=>def && def.affects[cid]);
+        hotHTML += '<div style="display:flex;align-items:center;gap:8px;padding:7px 8px;background:white;border-radius:10px;margin-bottom:5px;border:1.5px solid '+(isUp?'rgba(46,125,50,.3)':'rgba(198,40,40,.3)')+'">';
+        hotHTML += '<div style="font-size:24px">'+c.e+'</div>';
+        hotHTML += '<div style="flex:1;min-width:0">';
+        hotHTML += '<div style="font-family:var(--ff);font-size:11px;color:#3d2608">'+c.n+'</div>';
+        hotHTML += '<div style="font-size:8.5px;color:var(--txt3);font-family:var(--fb);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(cause?cause.headline.substring(0,42):'Market shift')+'</div>';
+        hotHTML += '</div>';
+        hotHTML += '<div style="font-family:var(--ff);font-size:13px;color:'+color+';text-align:right">'+arrow+(pct>=0?'+':'')+pct+'%</div>';
+        hotHTML += '<button onclick="_quickSellAll(\''+cid+'\')" style="background:linear-gradient(180deg,'+(isUp?'#66bb6a,#388e3c':'#bbb,#888')+');color:white;border:none;font-family:var(--ff);font-size:9px;padding:6px 9px;border-radius:9px;cursor:pointer;box-shadow:0 3px 0 '+(isUp?'#1b5e20':'#555')+'">SELL</button>';
+        hotHTML += '</div>';
+      });
+    }
+    hotHTML += '</div>';
+
+    // ─── WORLD NEWS FEED ───
+    let newsHTML = '<div style="background:white;border:3px solid #3b9bff;border-radius:16px;padding:12px;box-shadow:0 4px 0 #1976d2,0 5px 12px rgba(59,155,255,.2)">';
+    newsHTML += '<div style="font-family:var(--ff);font-size:13px;color:#1565c0;margin-bottom:9px;letter-spacing:.06em">📰 WORLD NEWS</div>';
+    const events = (G.activeEvents||[])
+      .map(act=>({act, def: DEMAND_EVENTS.find(d=>d.id===act.eventId)}))
+      .filter(x=>x.def);
+    if(events.length===0){
+      newsHTML += '<div style="font-size:10px;color:var(--txt3);text-align:center;padding:8px">No active events. Markets are calm.</div>';
+    } else {
+      events.forEach(({act,def})=>{
+        const now = Date.now();
+        const upcoming = now < act.startedAt;
+        const daysLeft = Math.ceil((act.expiresAt-now)/(24*60*60*1000));
+        const sevColor = def.severity==='crisis'?'#c62828':def.severity==='major'?'#e65100':'#f9a825';
+        const sevLabel = def.severity==='crisis'?'CRISIS':def.severity==='major'?'MAJOR':'MILD';
+        newsHTML += '<div style="background:rgba('+(def.severity==='crisis'?'198,40,40':def.severity==='major'?'230,81,0':'249,168,37')+',.07);border-left:3px solid '+sevColor+';border-radius:8px;padding:7px 9px;margin-bottom:6px">';
+        newsHTML += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">';
+        newsHTML += '<div style="font-family:var(--ff);font-size:10.5px;color:'+sevColor+';flex:1">'+def.headline+'</div>';
+        newsHTML += '<div style="font-family:var(--ff);font-size:7.5px;background:'+sevColor+';color:white;padding:1px 5px;border-radius:5px">'+sevLabel+'</div>';
+        newsHTML += '</div>';
+        newsHTML += '<div style="font-size:9px;color:var(--txt2);font-family:var(--fb);margin-bottom:4px;line-height:1.4">'+def.desc+'</div>';
+        const affected = Object.entries(def.affects).map(([cid,b])=>(C[cid]?.e||'')+(b>1?'▲':'▼')).join(' ');
+        newsHTML += '<div style="display:flex;justify-content:space-between;align-items:center">';
+        newsHTML += '<div style="font-size:11px">'+affected+'</div>';
+        newsHTML += '<div style="font-size:8.5px;color:var(--txt3);font-family:var(--fb)">'+(upcoming?'⏳ in '+Math.ceil((act.startedAt-now)/(24*60*60*1000))+'d':daysLeft+'d remaining')+'</div>';
+        newsHTML += '</div>';
+        newsHTML += '</div>';
+      });
+    }
+    newsHTML += '</div>';
+
+    // ─── BUYERS ───
+    let buyersHTML = '<div style="background:white;border:3px solid #66bb6a;border-radius:16px;padding:12px;box-shadow:0 4px 0 #2e7d32,0 5px 12px rgba(102,187,106,.2)">';
+    buyersHTML += '<div style="font-family:var(--ff);font-size:13px;color:#1b5e20;margin-bottom:9px;letter-spacing:.06em">🏪 BUYERS</div>';
+    // Special orders (rotating) first
+    const rb = G.rotatingBuyers||[];
+    if(rb.length > 0){
+      buyersHTML += '<div style="font-family:var(--ff);font-size:9px;color:#e65100;margin-bottom:5px;letter-spacing:.06em">⭐ SPECIAL ORDERS (24h)</div>';
+      rb.forEach(b=>{
+        const c = C[b.wants[0]]; if(!c) return;
+        const have = G.grid.filter(it=>it && it.cid===b.wants[0]).length + G.warehouse.filter(it=>it && it.cid===b.wants[0]).length;
+        const can = have >= b.qty;
+        buyersHTML += '<div style="display:flex;align-items:center;gap:8px;padding:7px;background:linear-gradient(135deg,#fff3e0,#ffe0b2);border:1.5px solid #ff9800;border-radius:10px;margin-bottom:5px">';
+        buyersHTML += '<div style="font-size:24px">'+b.emoji+'</div>';
+        buyersHTML += '<div style="flex:1;min-width:0">';
+        buyersHTML += '<div style="font-family:var(--ff);font-size:10px;color:#3d2608">'+b.name+'</div>';
+        buyersHTML += '<div style="font-size:9px;color:var(--txt2);font-family:var(--fb)">Wants '+b.qty+'× '+c.e+' '+c.n+'</div>';
+        buyersHTML += '<div style="font-size:8.5px;color:#2e7d32;font-family:var(--ff)">💰 '+fp(b.payTotal)+' total</div>';
+        buyersHTML += '</div>';
+        buyersHTML += '<button onclick="sellToBuyer(\''+b.id+'\',false)" '+(can?'':'disabled style="opacity:.4"')+' style="background:linear-gradient(180deg,#66bb6a,#388e3c);color:white;border:none;font-family:var(--ff);font-size:9px;padding:7px 10px;border-radius:9px;cursor:pointer;box-shadow:0 3px 0 #1b5e20'+(can?'':';opacity:.4')+'">'+(can?'FULFILL':have+'/'+b.qty)+'</button>';
+        buyersHTML += '</div>';
+      });
+    }
+    buyersHTML += '<div style="font-family:var(--ff);font-size:9px;color:var(--txt3);margin:8px 0 5px;letter-spacing:.06em">📋 REGULAR CUSTOMERS</div>';
+    FIXED_BUYERS.forEach(b=>{
+      const wantList = b.wants.map(cid=>C[cid]?.e||'?').join(' ');
+      buyersHTML += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(102,187,106,.06);border:1px solid rgba(102,187,106,.3);border-radius:9px;margin-bottom:4px">';
+      buyersHTML += '<div style="font-size:22px">'+b.emoji+'</div>';
+      buyersHTML += '<div style="flex:1;min-width:0">';
+      buyersHTML += '<div style="font-family:var(--ff);font-size:10px;color:#3d2608">'+b.name+'</div>';
+      buyersHTML += '<div style="font-size:9px">'+wantList+' <span style="font-size:8px;color:#2e7d32;margin-left:4px">+'+Math.round((b.payMult-1)*100)+'%</span></div>';
+      buyersHTML += '</div>';
+      buyersHTML += '<button onclick="sellToBuyer(\''+b.id+'\',true)" style="background:white;border:2px solid #66bb6a;color:#1b5e20;font-family:var(--ff);font-size:9px;padding:6px 9px;border-radius:8px;cursor:pointer">SELL 1</button>';
+      buyersHTML += '</div>';
+    });
+    buyersHTML += '</div>';
+
+    screen.innerHTML = hotHTML + newsHTML + buyersHTML;
+  };
+})();
+
+// Quick-sell helper
+function _quickSellAll(cid){
+  const c = C[cid]; if(!c) return;
+  const price = G.prices[cid]?.p || c.base;
+  let count = 0, earnedTotal = 0;
+  for(let i=0;i<G.grid.length;i++){
+    if(G.grid[i] && G.grid[i].cid===cid){ G.grid[i]=null; count++; earnedTotal += price; }
+  }
+  G.warehouse = G.warehouse.filter(it=>{
+    if(it && it.cid===cid){ count++; earnedTotal += price; return false; }
+    return true;
+  });
+  if(count===0){ notif('error','You don\'t have any '+c.n+'!'); return; }
+  G.coins += Math.floor(earnedTotal);
+  G.earned = (G.earned||0) + Math.floor(earnedTotal);
+  renderGrid(); updHUD(); save();
+  sSell();
+  notif('levelup','💰 Sold '+count+'× '+c.e+' for '+fp(earnedTotal)+'!');
+  renderMarket();
+}
+
+// Init demand system at startup
+setTimeout(()=>{
+  _initDemandSystem();
+  _initBuyers();
+},1500);
+
+// Also when player starts new game
+(function(){
+  const orig = startGame;
+  startGame = function(){
+    orig();
+    G.demandMults = {};
+    G.activeEvents = [];
+    G.eventsLastRolled = 0;
+    G.rotatingBuyers = [];
+    G.buyersLastRolled = 0;
+    G.mines = {};
+    G.mineOutputs = {};
+    G.facActiveRecipe = {};
+    setTimeout(()=>{_initDemandSystem();_initBuyers();},200);
+  };
 })();
 
 </script>
